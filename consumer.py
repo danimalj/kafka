@@ -1,55 +1,66 @@
+import argparse
+import signal
+import logging
 from confluent_kafka import Consumer
-import json
-import sys
 
-conf = {'bootstrap.servers': 'localhost:9092'
-                     , 'group.id': 'mygroup'
-                    , 'auto.offset.reset': 'earliest'}
-
-consumer = Consumer(conf)
-
-running = True
-
-
-def shutdown():
+def shutdown(signum, frame):
+    global running
+    print("Shutting down Kafka consumer gracefully...")
     running = False
 
-def print_msg(msg):
-    print('%% %s [%d] at offset %d with key %s:\n' %
-          (msg.topic(), msg.partition(), msg.offset(), str(msg.key())))
-    print(msg.value())
+import argparse
+import logging
+import signal
 
-def KafkaException(error):
-    print(f"Kafka Exception: {error}")
-    shutdown()
+def main():
+    """
+    Kafka Consumer main function.
 
-def KafkaError(error):
-    print(f"Kafka Error: {error}")
-    shutdown()
+    Args:
+        --topic (str): Kafka topic to consume messages from.
+        --broker (str): Kafka broker to connect to.
+        --group (str): Consumer group to join.
+        --offset (str, optional): Offset to start consuming from. Defaults to "earliest".
+        --commit-count (int, optional): Number of messages to consume before committing. Defaults to 100.
+    """
+    parser = argparse.ArgumentParser(description="Kafka Consumer")
+    parser.add_argument("--topic", required=True, help="Kafka topic")
+    parser.add_argument("--broker", required=True, help="Kafka broker to connect to")
+    parser.add_argument("--group", required=True, help="Consumer group")
+    parser.add_argument("--offset", default="earliest", help="Offset to start consuming from")
+    parser.add_argument("--commit-count", type=int, default=100, help="Number of messages to consume before committing")
+    args = parser.parse_args()
 
+    signal.signal(signal.SIGINT, shutdown)
+    signal.signal(signal.SIGTERM, shutdown)
 
-def basic_consume_loop(consumer, topics):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    logger = logging.getLogger(__name__)
+
+    conf = {'bootstrap.servers': args.broker, 'group.id': args.group, 'auto.offset.reset': args.offset}
+    consumer = Consumer(conf)
+
     try:
-        consumer.subscribe(topics)
-
+        consumer.subscribe([args.topic])
+        counter = 0
         while running:
             msg = consumer.poll(timeout=0.1)
-            if msg is None: continue
+            if msg is None:
+                continue
+            counter += 1
+
+            if counter == args.commit_count:
+                logger.info(f"Committing offset at {msg.offset()} as a safety measure.")
+                consumer.commit()
+                counter = 0
 
             if msg.error():
-                if msg.error().code() == KafkaError._PARTITION_EOF:
-                    # End of partition event
-                    sys.stderr.write('%% %s [%d] reached end at offset %d\n' %
-                                     (msg.topic(), msg.partition(), msg.offset()))
-                elif msg.error():
-                    raise KafkaException(msg.error())
-            else:
-                if msg.offset() % 10000 == 0:
-                    print_msg(msg)
+                logger.error(f"Kafka Error: {msg.error()}")
+                # Handle other exceptions as needed
+
     finally:
-        # Close down consumer to commit final offsets.
         consumer.close()
 
-
-
-basic_consume_loop(consumer, ['transactions'])
+if __name__ == "__main__":
+    running = True
+    main()
